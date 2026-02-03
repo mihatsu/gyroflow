@@ -34,6 +34,7 @@ pub struct HorizonLock {
     pub turn_threshold: f64,
     pub turn_smoothing_ms: f64,
     pub turn_multiplier: f64,
+    pub tilt_accel_limit: f64,
 }
 
 impl Default for HorizonLock {
@@ -47,11 +48,12 @@ impl Default for HorizonLock {
         turn_threshold: 5.0,
         turn_smoothing_ms: 500.0,
         turn_multiplier: 1.0,
+        tilt_accel_limit: f64::INFINITY,
     } }
 }
 
 impl HorizonLock {
-    pub fn set_horizon(&mut self, lock_percent: f64, roll: f64, lock_pitch: bool, pitch: f64, automatic_lock: bool, turn_threshold: f64, turn_smoothing_ms: f64, turn_multiplier: f64) {
+    pub fn set_horizon(&mut self, lock_percent: f64, roll: f64, lock_pitch: bool, pitch: f64, automatic_lock: bool, turn_threshold: f64, turn_smoothing_ms: f64, turn_multiplier: f64, tilt_accel_limit: f64) {
         self.horizonroll = roll;
         self.horizonlockpercent = lock_percent;
         self.lock_enabled = self.horizonlockpercent > 1e-6;
@@ -61,6 +63,7 @@ impl HorizonLock {
         self.turn_threshold = turn_threshold;
         self.turn_smoothing_ms = turn_smoothing_ms;
         self.turn_multiplier = turn_multiplier;
+        self.tilt_accel_limit = tilt_accel_limit;
     }
 
     pub fn get_checksum(&self) -> u64 {
@@ -72,6 +75,7 @@ impl HorizonLock {
         hasher.write_u64(self.turn_threshold.to_bits());
         hasher.write_u64(self.turn_smoothing_ms.to_bits());
         hasher.write_u64(self.turn_multiplier.to_bits());
+        hasher.write_u64(self.tilt_accel_limit.to_bits());
         hasher.finish()
     }
 
@@ -147,9 +151,26 @@ impl HorizonLock {
                                 prev * (1.0 - alpha) + target * alpha
                             } else { target };
 
-                            prev_tilt_smoothed_grav = Some(smoothed);
+                            // Apply acceleration/deceleration limit
+                            let mut accel_limited = smoothed;
+                            if self.tilt_accel_limit.is_finite() {
+                                if let Some(prev_tilt) = prev_tilt_smoothed_grav {
+                                    if let Some(prev_ts_val) = prev_tilt_ts_grav {
+                                        let dt = (*ts as f64 - prev_ts_val as f64) / 1_000_000.0;
+                                        if dt > 0.0 {
+                                            let max_change = self.tilt_accel_limit * dt;
+                                            let change = smoothed - prev_tilt;
+                                            if change.abs() > max_change {
+                                                accel_limited = prev_tilt + change.signum() * max_change;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            prev_tilt_smoothed_grav = Some(accel_limited);
                             prev_tilt_ts_grav = Some(*ts);
-                            dynamic_tilt_deg = smoothed;
+                            dynamic_tilt_deg = accel_limited;
                         }
 
                         let total_horizonroll_deg = horizonroll + dynamic_tilt_deg;
@@ -188,9 +209,27 @@ impl HorizonLock {
                     let smoothed = if let Some(prev) = prev_tilt_smoothed {
                         prev * (1.0 - alpha) + target * alpha
                     } else { target };
-                    prev_tilt_smoothed = Some(smoothed);
+
+                    // Apply acceleration/deceleration limit
+                    let mut accel_limited = smoothed;
+                    if self.tilt_accel_limit.is_finite() {
+                        if let Some(prev_tilt) = prev_tilt_smoothed {
+                            if let Some(prev_ts_val) = prev_tilt_ts {
+                                let dt = (*ts as f64 - prev_ts_val as f64) / 1_000_000.0;
+                                if dt > 0.0 {
+                                    let max_change = self.tilt_accel_limit * dt;
+                                    let change = smoothed - prev_tilt;
+                                    if change.abs() > max_change {
+                                        accel_limited = prev_tilt + change.signum() * max_change;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    prev_tilt_smoothed = Some(accel_limited);
                     prev_tilt_ts = Some(*ts);
-                    dynamic_tilt_deg = smoothed;
+                    dynamic_tilt_deg = accel_limited;
                 }
 
                 let total_horizonroll_deg = horizonroll + dynamic_tilt_deg;
